@@ -40,9 +40,10 @@ jobs:
           cp scripts/android/overlay/default.json src-tauri/capabilities/default.json
           echo "Android overlay applied"
 
+      # package.json already pins pnpm@10.29.3 via "packageManager".
+      # Passing `version` here makes action-setup fail with
+      # "Multiple versions of pnpm specified".
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - uses: actions/setup-node@v4
         with:

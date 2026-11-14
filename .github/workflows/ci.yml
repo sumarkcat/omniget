@@ -1,8 +1,9 @@
 name: CI
 
 on:
-  push:
-    branches: [main, dev, rebrand, v1]
+  # push 触发已刻意移除：三平台矩阵里 macOS 按 10 倍计费，
+  # 每次提交都会烧掉免费 Actions 额度。需要时手动 workflow_dispatch。
+  workflow_dispatch:
   pull_request:
 
 concurrency:

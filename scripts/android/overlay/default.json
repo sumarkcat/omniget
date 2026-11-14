@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "default",
+  "description": "Android capability for the main WebView",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

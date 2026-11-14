@@ -1,0 +1,125 @@
+name: Android APK (OmniGet)
+
+# 只手动触发。仓库原有的 ci.yml 是 push 触发 + 三平台矩阵（macOS 10 倍计费），
+# 已同步改成 workflow_dispatch / pull_request，避免每次提交烧掉免费额度。
+on:
+  workflow_dispatch:
+    inputs:
+      abi:
+        description: '目标 ABI（arm64 覆盖绝大多数安卓手机）'
+        required: false
+        default: 'aarch64'
+        type: choice
+        options:
+          - aarch64
+          - all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omniget-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # 桌面 Rust crate 依赖 yt-dlp/FFmpeg 外部二进制、single-instance、tray、
+      # librqbit、X11/ONNX/native-tls 等，无法为 aarch64-linux-android 编译。
+      # 这里只替换 Rust 侧为最小运行时，SvelteKit 前端原样保留。
+      - name: Apply Android overlay
+        run: |
+          set -e
+          cp scripts/android/overlay/Cargo.toml src-tauri/Cargo.toml
+          cp scripts/android/overlay/lib.rs src-tauri/src/lib.rs
+          cp scripts/android/overlay/tauri.conf.json src-tauri/tauri.conf.json
+          cp scripts/android/overlay/default.json src-tauri/capabilities/default.json
+          echo "Android overlay applied"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: omniget-android-${{ inputs.abi }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Resolve Android SDK / NDK
+        run: |
+          set -e
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          NDK="${ANDROID_NDK_LATEST_HOME:-}"
+          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
+            NDK=$(ls -d "$SDK"/ndk/* 2>/dev/null | sort -V | tail -1 || true)
+          fi
+          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
+            echo "::error::No Android NDK found on runner"
+            exit 1
+          fi
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "resolved SDK = $SDK"
+          echo "resolved NDK = $NDK"
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Init Android project (gen/android)
+        run: pnpm tauri android init --ci
+
+      - name: Generate debug keystore
+        # runner 每次都是新虚拟机，密钥对随机 → 不同批次 APK 签名不同。
+        # 覆盖安装前需先 adb uninstall com.sumarkcat.omniget。
+        run: |
+          set -e
+          mkdir -p "$HOME/.android"
+          KS="$HOME/.android/debug.keystore"
+          if [ ! -f "$KS" ]; then
+            keytool -genkeypair -v -keystore "$KS" -storepass android -alias androiddebugkey \
+              -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US" >/dev/null 2>&1
+          fi
+          ls -l "$KS"
+
+      - name: Build debug APK
+        run: |
+          if [ "${{ inputs.abi }}" = "all" ]; then
+            pnpm tauri android build --debug --apk
+          else
+            pnpm tauri android build --debug --apk --target aarch64
+          fi
+
+      - name: Locate APK
+        run: |
+          find src-tauri/gen/android -name "*.apk" -type f -exec ls -lh {} \; || true
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: omniget-android-${{ inputs.abi }}-debug
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          retention-days: 3
+          if-no-files-found: warn
